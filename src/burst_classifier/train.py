@@ -267,6 +267,7 @@ def update_latest_pointer(run_dir: Path, artifacts_root: Path) -> None:
 def log_mlflow(run_dir: Path, run_id: str, metrics: dict[str, Any], config: dict) -> None:
     try:
         import mlflow
+        os.environ.setdefault("MLFLOW_ALLOW_FILE_STORE", "true")
 
         mlflow_cfg = config.get("mlflow", {})
         local_mlruns = Path("/tmp/mlruns") if os.environ.get("GCS_BUCKET") else run_dir.parent / "mlruns"
