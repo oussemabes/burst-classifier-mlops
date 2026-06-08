@@ -1,0 +1,23 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+ENV PYTHONPATH=/app/src
+ENV PYTHONUNBUFFERED=1
+
+ARG GCS_BUCKET
+ENV GCS_BUCKET=${GCS_BUCKET}
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libsndfile1 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt pyproject.toml ./
+RUN pip install --no-cache-dir \
+    fastapi uvicorn[standard] prometheus-client \
+    onnxruntime google-cloud-storage \
+    numpy pydantic
+
+COPY src ./src
+
+EXPOSE 8080
+CMD ["uvicorn", "burst_classifier.api:app", "--host", "0.0.0.0", "--port", "8080"]

@@ -1,0 +1,27 @@
+groups:
+  - name: burst-classifier
+    rules:
+      - alert: BurstApiHighErrorRate
+        expr: sum(rate(burst_api_requests_total{status="error"}[5m])) / sum(rate(burst_api_requests_total[5m])) > 0.05
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Burst classifier API error rate above 5 percent
+
+      - alert: BurstApiHighLatency
+        expr: histogram_quantile(0.95, sum(rate(burst_api_latency_seconds_bucket[5m])) by (le)) > 1.0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Burst classifier API p95 latency above 1 second
+
+      - alert: BurstApiLowConfidence
+        expr: histogram_quantile(0.50, sum(rate(burst_api_confidence_bucket[30m])) by (le)) < 0.60
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: Median model confidence is below 0.60
+

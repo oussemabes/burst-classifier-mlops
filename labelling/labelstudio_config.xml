@@ -1,0 +1,9 @@
+<View>
+  <Labels name="label" toName="audio">
+    <Label value="b" background="#1f77b4"/>
+    <Label value="mb" background="#ff7f0e"/>
+    <Label value="h" background="#2ca02c"/>
+  </Labels>
+  <Audio name="audio" value="$audio"/>
+</View>
+

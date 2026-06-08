@@ -1,0 +1,171 @@
+substitutions:
+  _REGION: europe-west1
+  _PROJECT: kwore-web-dev
+  _BUCKET: kwore-web-dev-burst-classifier
+  _REPO: burst-classifier
+  _IMAGE: burst-classifier-api
+  _SERVICE: burst-classifier-api
+
+steps:
+  # 1 — Unit tests
+  - name: python:3.11-slim
+    id: test
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        pip install -r requirements.txt -q
+        pip install -e . -q
+        python -m pytest tests/ -q
+
+  # 2 — Upload training data to GCS (idempotent — safe to re-run)
+  - name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    id: upload-data
+    waitFor: [test]
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        gsutil -m cp AS_1.wav AS_1.txt 23M74M.wav 23M74M.txt gs://${_BUCKET}/data/
+        echo "Data uploaded to gs://${_BUCKET}/data/"
+
+  # 3 — Build training image
+  - name: gcr.io/cloud-builders/docker
+    id: build-train-image
+    waitFor: [test]
+    args:
+      - build
+      - -f
+      - Dockerfile.train
+      - -t
+      - ${_REGION}-docker.pkg.dev/${_PROJECT}/${_REPO}/burst-classifier-train:$SHORT_SHA
+      - .
+
+  # 3 — Push training image to Artifact Registry
+  - name: gcr.io/cloud-builders/docker
+    id: push-train-image
+    waitFor: [build-train-image]
+    args:
+      - push
+      - ${_REGION}-docker.pkg.dev/${_PROJECT}/${_REPO}/burst-classifier-train:$SHORT_SHA
+
+  # 4 — Submit Vertex AI custom training job and wait
+  - name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    id: train
+    waitFor: [push-train-image]
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        sed \
+          -e "s|__IMAGE_URI__|${_REGION}-docker.pkg.dev/${_PROJECT}/${_REPO}/burst-classifier-train:$SHORT_SHA|g" \
+          -e "s|__GCS_DATA_DIR__|gs://${_BUCKET}/data|g" \
+          -e "s|__GCS_BUCKET__|${_BUCKET}|g" \
+          vertex_job_template.yaml > /workspace/vertex_job.yaml
+
+        gcloud ai custom-jobs create \
+          --region=${_REGION} \
+          --display-name="burst-classifier-$SHORT_SHA" \
+          --config=/workspace/vertex_job.yaml \
+          --format="value(name)" > /workspace/job_name.txt
+
+        JOB=$$(cat /workspace/job_name.txt)
+        echo "Waiting for Vertex AI job: $$JOB"
+        while true; do
+          STATE=$$(gcloud ai custom-jobs describe "$$JOB" --region=${_REGION} --format="value(state)")
+          echo "State: $$STATE"
+          case $$STATE in
+            JOB_STATE_SUCCEEDED) echo "Training succeeded"; break ;;
+            JOB_STATE_FAILED|JOB_STATE_CANCELLED)
+              echo "Training job failed: $$STATE"; exit 1 ;;
+          esac
+          sleep 30
+        done
+
+  # 5 — Deployment gate: read metrics from GCS
+  - name: python:3.11-slim
+    id: gate-check
+    waitFor: [train]
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        pip install google-cloud-storage pyyaml -q
+        python - <<'EOF'
+        import json, sys
+        from google.cloud import storage
+
+        import yaml
+        client = storage.Client()
+        bucket = client.bucket("${_BUCKET}")
+
+        # Read thresholds from config (single source of truth)
+        cfg = yaml.safe_load(bucket.blob("models/latest/config.yaml").download_as_text())
+        min_macro_f1 = cfg["evaluation"]["min_macro_f1"]
+        min_recall_threshold = cfg["evaluation"]["min_per_class_recall"]
+
+        metrics = json.loads(bucket.blob("models/latest/metrics.json").download_as_text())
+        macro_f1 = metrics["macro_f1"]
+        min_recall = min(
+            metrics["classification_report"][cls]["recall"]
+            for cls in ["b", "mb", "h"]
+            if cls in metrics["classification_report"]
+        )
+        print(f"macro_f1={macro_f1:.4f} (min={min_macro_f1})  min_recall={min_recall:.4f} (min={min_recall_threshold})")
+        if macro_f1 < min_macro_f1 or min_recall < min_recall_threshold:
+            print("GATE FAILED — deployment blocked")
+            sys.exit(1)
+        print("GATE PASSED")
+        EOF
+
+  # 6 — Build API image
+  - name: gcr.io/cloud-builders/docker
+    id: build-api
+    waitFor: [gate-check]
+    args:
+      - build
+      - -f
+      - Dockerfile.api
+      - -t
+      - ${_REGION}-docker.pkg.dev/${_PROJECT}/${_REPO}/${_IMAGE}:$SHORT_SHA
+      - -t
+      - ${_REGION}-docker.pkg.dev/${_PROJECT}/${_REPO}/${_IMAGE}:latest
+      - --build-arg
+      - GCS_BUCKET=${_BUCKET}
+      - .
+
+  # 7 — Push API image
+  - name: gcr.io/cloud-builders/docker
+    id: push-api
+    waitFor: [build-api]
+    args:
+      - push
+      - --all-tags
+      - ${_REGION}-docker.pkg.dev/${_PROJECT}/${_REPO}/${_IMAGE}
+
+  # 8 — Deploy to Cloud Run
+  - name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    id: deploy
+    waitFor: [push-api]
+    args:
+      - gcloud
+      - run
+      - deploy
+      - ${_SERVICE}
+      - --image=${_REGION}-docker.pkg.dev/${_PROJECT}/${_REPO}/${_IMAGE}:$SHORT_SHA
+      - --region=${_REGION}
+      - --platform=managed
+      - --allow-unauthenticated
+      - --set-env-vars=GCS_BUCKET=${_BUCKET},MODEL_PATH=models/latest/model.onnx,GIT_SHA=$SHORT_SHA
+      - --memory=512Mi
+      - --cpu=1
+      - --min-instances=0
+      - --max-instances=3
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+  machineType: E2_HIGHCPU_8
+
+images:
+  - ${_REGION}-docker.pkg.dev/${_PROJECT}/${_REPO}/${_IMAGE}:$SHORT_SHA
+  - ${_REGION}-docker.pkg.dev/${_PROJECT}/${_REPO}/${_IMAGE}:latest

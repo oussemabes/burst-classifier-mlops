@@ -1,0 +1,31 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+artifacts/
+mlruns/
+model_repository/
+reports/
+*.onnx
+*.pt
+*.pth
+*.ts
+.env
+
+# Service account keys and all JSON credentials — never commit
+*.json
+
+# Terraform state — contains sensitive resource outputs
+*.tfstate
+*.tfstate.backup
+.terraform/
+.terraform.lock.hcl
+
+# Python packaging
+*.egg-info/
+
+# GitHub Actions — Cloud Build handles CI/CD, not GitHub Actions
+.github/

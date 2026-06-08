@@ -1,0 +1,55 @@
+seed: 42
+
+data:
+  root: "."
+  audio_glob: "*.wav"
+  label_glob: "*.txt"
+  target_sample_rate: 16000
+  label_aliases:
+    b: b
+    sb: b
+    sbs: b
+    mb: mb
+    h: h
+  target_labels: ["b", "mb", "h"]
+
+features:
+  n_mels: 64
+  n_fft: 512
+  hop_length: 160
+  win_length: 400
+  f_min: 20
+  f_max: 7600
+  segment_seconds: 1.0
+  context_seconds: 0.15
+
+split:
+  validation_size: 0.15
+  test_size: 0.15
+  random_state: 42
+
+training:
+  epochs: 30
+  batch_size: 64
+  learning_rate: 0.001
+  weight_decay: 0.0001
+  num_workers: 0
+  early_stopping_patience: 6
+
+evaluation:
+  min_macro_f1: 0.20
+  min_per_class_recall: 0.20
+
+export:
+  opset_version: 17
+  model_name: burst_classifier
+
+mlflow:
+  tracking_uri: "gs://kwore-web-dev-burst-classifier/mlflow"   # override with MLFLOW_TRACKING_URI env var locally
+  experiment_name: "burst_classifier"
+
+gcp:
+  project: "kwore-web-dev"
+  region: "europe-west1"
+  bucket: "kwore-web-dev-burst-classifier"   # override with GCS_BUCKET env var
+
