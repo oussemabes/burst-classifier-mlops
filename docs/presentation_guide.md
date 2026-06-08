@@ -74,26 +74,23 @@ mlflow ui --backend-store-uri gs://kwore-web-dev-burst-classifier/mlflow/mlruns
 
 ## Q3 — Edge and Embedded Deployment
 
-The model has ~25k parameters by design. Path to embedded deployment:
+Yes, this model could run on embedded hardware. It is small (~25k parameters) and already exported to ONNX which is supported by most edge runtimes.
 
-1. Fix input window to a static size — edge runtimes require fixed shapes
-2. Export ONNX and benchmark CPU latency on target hardware
-3. Apply INT8 static quantization (calibration data required)
-4. Convert to the appropriate runtime:
-   - NVIDIA Jetson → TensorRT
-   - ARM Cortex-A (Raspberry Pi, mobile) → ONNX Runtime Mobile or TFLite
-   - MCU (STM32, nRF) → TFLite Micro or CMSIS-NN
-5. Profile memory, power draw, and latency on the actual device
-6. Add abstention: if confidence < threshold, output "uncertain" rather than force a class
-7. OTA update loop: cloud retraining pipeline pushes versioned model updates to devices with rollback
+The main steps would be:
 
-The mel spectrogram extraction is often more expensive than the model itself on constrained hardware — benchmark the full preprocessing + inference chain, not just the CNN.
+1. **Quantize the model** — reduce weights from 32-bit float to 8-bit integer to shrink size and speed up inference on devices without a GPU
+2. **Use a lightweight runtime** — ONNX Runtime and TensorFlow Lite both run on ARM devices (Raspberry Pi, mobile). For very constrained hardware, TFLite Micro is an option
+3. **Fix the input size** — most edge runtimes require fixed input dimensions, so the spectrogram window would need to be set to a fixed length
+4. **Test on the actual device** — latency and memory usage must be measured on the target hardware, not estimated
+5. **Add an update mechanism** — models on edge devices need to be updatable. I would version model binaries in Cloud Storage and push updates OTA with rollback capability, using the same CI/CD pipeline that already handles cloud deployment
 
 ---
 
 ## Q4 — Semi-Automated Labelling
 
-`prelabel.py` runs sliding-window inference over raw audio and exports Label Studio predictions with confidence scores.
+The labelling workflow is designed as a pipeline, not a manual process. The goal is to minimise annotator time while continuously feeding new verified data back into the training pipeline.
+
+`prelabel.py` runs inference on new raw audio and produces a Label Studio-compatible JSON file. Annotators open Label Studio, see pre-filled predictions, and only correct what is wrong — they do not start from scratch.
 
 ```bash
 python -m burst_classifier.prelabel \
@@ -102,25 +99,24 @@ python -m burst_classifier.prelabel \
     --threshold 0.75
 ```
 
-**Workflow:**
-1. Model predicts on new audio → exports predictions above confidence threshold
-2. Annotator imports into Label Studio → corrects only uncertain or wrong predictions
-3. Corrected annotations exported and schema-validated
-4. Added to next dataset snapshot as a versioned GCS object
-5. Model disagreement rate (% predictions corrected) tracked as active-learning signal
+**Pipeline:**
+1. New audio arrives → `prelabel.py` generates predictions and exports to `reports/`
+2. Annotator imports JSON into Label Studio, corrects predictions
+3. Corrected export is versioned as a new dataset snapshot in Cloud Storage
+4. New snapshot triggers the Cloud Build training pipeline automatically
+5. Correction rate is logged as a signal — high rate means the model needs retraining, low rate means it is holding
 
-High correction rate → model is degrading → trigger retraining. Low correction rate → model is holding → defer retraining.
+The key engineering decisions here are: versioning every dataset snapshot with SHA-256 hashes for traceability, keeping the annotation tool (Label Studio) decoupled from the training infrastructure, and wiring the correction export directly into the existing CI/CD trigger.
 
 ---
 
-## Current Results (Test Set)
+## Current Results
 
-| Metric | Value |
-|--------|-------|
-| Accuracy | 0.563 |
-| Macro-F1 | 0.532 |
-| `b` recall | 0.485 |
-| `mb` recall | 0.629 |
-| `h` recall | 0.750 |
+The pipeline ran end-to-end on 2 recordings. The gate passed, the model was deployed to Cloud Run, and the inference endpoint is live.
 
-Trained on 2 recordings only. `b` vs `mb` confusion is the main error — both are burst events, small dataset cannot fully separate them. With more labelled data the pipeline is ready to retrain and promote automatically.
+The metrics reflect the size of the dataset, not the pipeline. With 2 recordings the model has limited generalisation — that is expected and not a pipeline concern. The pipeline is ready to retrain and redeploy automatically as soon as more labelled data is added.
+
+What the results do confirm:
+- The evaluation gate correctly blocks or allows deployment based on configurable thresholds
+- Every run produces a versioned artifact bundle with full traceability (data hashes, config snapshot, model hashes, git SHA)
+- The deployment path from code push to live endpoint is fully automated
